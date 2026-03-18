@@ -300,7 +300,13 @@ def build_results_html(results: list) -> str:
     return results_markup
 
 
-# ── ROUTE ─────────────────────────────────────────────────────
+# ── ROUTES ────────────────────────────────────────────────────
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
+
+
 @app.get("/webhook")
 async def webhook(
     api_key: str | None = Query(default=None),
