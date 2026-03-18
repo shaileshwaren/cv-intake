@@ -2,11 +2,12 @@
 Manatal CV Intake — FastAPI Server
 ===================================
 Routes:
-  GET /webhook?api_key=xxx  → Processes all Pending rows in Airtable, returns HTML summary
-                              Triggered by Airtable button "Open URL" action
+  GET /webhook?api_key=xxx  → Processes all Pending rows in Airtable.
+                              Streams an instant spinner, then a results page.
+                              Triggered by Airtable button "Open URL" action.
 
 Run locally:  uvicorn server:app --reload --port 8080
-Open:         http://127.0.0.1:8080/webhook
+Open:         http://127.0.0.1:8080/webhook?api_key=<APP_API_KEY>
 """
 
 import asyncio
@@ -16,7 +17,7 @@ import os
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import StreamingResponse
 from pathlib import Path
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
@@ -30,11 +31,12 @@ app = FastAPI(title="Manatal CV Intake")
 MANATAL_API_TOKEN = os.getenv("MANATAL_API_TOKEN")
 AIRTABLE_TOKEN    = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID  = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE_ID = os.getenv("AIRTABLE_TABLE_ID")
 APP_API_KEY       = os.getenv("APP_API_KEY")
 
 MANATAL_BASE  = "https://api.manatal.com/open/v3"
 AIRTABLE_BASE = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}"
-INTAKE_TABLE  = "tbl9Pr2vrcwM71329"
+INTAKE_TABLE  = AIRTABLE_TABLE_ID
 STAGE_ID      = 174245
 
 MANATAL_HEADERS  = {"Authorization": f"Token {MANATAL_API_TOKEN}"}
@@ -136,13 +138,6 @@ def process_record(rec: dict) -> dict:
         "error":        None,
     }
 
-    # Idempotency guard — skip if already processed
-    if fields.get("Candidate ID"):
-        log.info("SKIP  %s — already has Candidate ID", name)
-        result["status"] = "skipped"
-        result["error"]  = "Already has Candidate ID"
-        return result
-
     if not name:
         update_record(record_id, {"Status": "Failed", "Notes": "Name is empty"})
         result["error"] = "Name is empty"
@@ -207,21 +202,61 @@ def process_record(rec: dict) -> dict:
     return result
 
 
-# ── HTML RESPONSE BUILDER ─────────────────────────────────────
-def build_html(results: list) -> str:
+# ── HTML BUILDERS ─────────────────────────────────────────────
+_PAGE_STYLES = """
+  body  { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          background: #f9fafb; color: #111827; margin: 0; padding: 40px 24px; }
+  h1    { font-size: 20px; font-weight: 700; margin: 0 0 4px }
+  .sub  { color: #6b7280; font-size: 14px; margin-bottom: 24px }
+  .stats{ display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap }
+  .stat { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+          padding: 12px 20px; min-width: 100px }
+  .stat-n { font-size: 28px; font-weight: 700 }
+  .stat-l { font-size: 12px; color: #6b7280; margin-top: 2px }
+  table { width: 100%; border-collapse: collapse; background: #fff;
+          border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden }
+  th    { background: #f3f4f6; text-align: left; padding: 10px 12px;
+          font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+          color: #6b7280; border-bottom: 1px solid #e5e7eb }
+  @keyframes spin { to { transform: rotate(360deg) } }
+  .spinner { width: 36px; height: 36px; border: 3px solid #e5e7eb;
+             border-top-color: #6b7280; border-radius: 50%;
+             animation: spin .8s linear infinite; margin-bottom: 16px }
+"""
+
+
+def build_spinner_html(count: int) -> str:
+    noun = "record" if count == 1 else "records"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CV Intake — Processing</title>
+  <style>{_PAGE_STYLES}</style>
+</head>
+<body>
+  <div id="spinner-view">
+    <div class="spinner"></div>
+    <h1>Processing {count} {noun}...</h1>
+    <p class="sub">Uploading to Manatal — please wait</p>
+  </div>
+  <div id="results-view" style="display:none"></div>
+"""
+
+
+def build_results_html(results: list) -> str:
     success = sum(1 for r in results if r["status"] == "success")
     failed  = sum(1 for r in results if r["status"] == "failed")
-    skipped = sum(1 for r in results if r["status"] == "skipped")
+    total   = len(results)
+    summary_color = "#16a34a" if failed == 0 else "#dc2626"
 
     rows = ""
     for r in results:
         if r["status"] == "success":
             badge = '<span style="color:#16a34a;font-weight:600">&#10003; Uploaded</span>'
-        elif r["status"] == "skipped":
-            badge = '<span style="color:#6b7280;font-weight:600">&#8212; Skipped</span>'
         else:
-            badge = f'<span style="color:#dc2626;font-weight:600">&#10007; Failed</span>'
-
+            badge = '<span style="color:#dc2626;font-weight:600">&#10007; Failed</span>'
         detail = r["error"] or (f"Candidate ID: {r['candidate_id']}" if r["candidate_id"] else "")
         rows += f"""
         <tr>
@@ -232,68 +267,46 @@ def build_html(results: list) -> str:
           <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#6b7280;font-size:13px">{detail}</td>
         </tr>"""
 
-    total = len(results)
-    summary_color = "#16a34a" if failed == 0 else "#dc2626"
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CV Intake — Results</title>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background:#f9fafb; color:#111827; margin:0; padding:40px 24px; }}
-    h1   {{ font-size:20px; font-weight:700; margin:0 0 4px }}
-    .sub {{ color:#6b7280; font-size:14px; margin-bottom:24px }}
-    .stats {{ display:flex; gap:16px; margin-bottom:24px; flex-wrap:wrap }}
-    .stat {{ background:#fff; border:1px solid #e5e7eb; border-radius:8px;
-             padding:12px 20px; min-width:100px }}
-    .stat-n {{ font-size:28px; font-weight:700 }}
-    .stat-l {{ font-size:12px; color:#6b7280; margin-top:2px }}
-    table {{ width:100%; border-collapse:collapse; background:#fff;
-             border:1px solid #e5e7eb; border-radius:8px; overflow:hidden }}
-    th    {{ background:#f3f4f6; text-align:left; padding:10px 12px;
-             font-size:12px; text-transform:uppercase; letter-spacing:.05em;
-             color:#6b7280; border-bottom:1px solid #e5e7eb }}
-  </style>
-</head>
-<body>
-  <h1>CV Intake — Run Complete</h1>
-  <p class="sub">Processed {total} pending record(s)</p>
-  <div class="stats">
-    <div class="stat">
-      <div class="stat-n" style="color:{summary_color}">{success}</div>
-      <div class="stat-l">Uploaded</div>
+    results_markup = f"""
+  <div id="results-content" style="display:none">
+    <h1>CV Intake — Run Complete</h1>
+    <p class="sub">Processed {total} pending record(s)</p>
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-n" style="color:{summary_color}">{success}</div>
+        <div class="stat-l">Uploaded</div>
+      </div>
+      <div class="stat">
+        <div class="stat-n" style="color:#dc2626">{failed}</div>
+        <div class="stat-l">Failed</div>
+      </div>
     </div>
-    <div class="stat">
-      <div class="stat-n" style="color:#dc2626">{failed}</div>
-      <div class="stat-l">Failed</div>
-    </div>
-    <div class="stat">
-      <div class="stat-n" style="color:#6b7280">{skipped}</div>
-      <div class="stat-l">Skipped</div>
-    </div>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Job ID</th><th>Source</th><th>Status</th><th>Detail</th></tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
   </div>
-  <table>
-    <thead>
-      <tr>
-        <th>Name</th><th>Job ID</th><th>Source</th><th>Status</th><th>Detail</th>
-      </tr>
-    </thead>
-    <tbody>{rows}</tbody>
-  </table>
+  <script>
+    document.getElementById('spinner-view').style.display = 'none';
+    var rv = document.getElementById('results-view');
+    rv.innerHTML = document.getElementById('results-content').innerHTML;
+    rv.style.display = 'block';
+  </script>
 </body>
 </html>"""
 
+    return results_markup
+
 
 # ── ROUTE ─────────────────────────────────────────────────────
-@app.get("/webhook", response_class=HTMLResponse)
+@app.get("/webhook")
 async def webhook(
     api_key: str | None = Query(default=None),
     x_api_key: str | None = Header(default=None),
 ):
-    """Triggered by Airtable button. Processes all Pending rows and returns an HTML summary."""
+    """Triggered by Airtable button. Streams a spinner instantly, then the results page."""
 
     if APP_API_KEY:
         provided = api_key or x_api_key
@@ -302,27 +315,38 @@ async def webhook(
 
     log.info("WEBHOOK triggered")
 
-    try:
-        records = get_pending_records()
-    except Exception as e:
-        log.error("Failed to fetch Airtable records: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch Airtable records: {e}")
+    async def generate():
+        try:
+            records = await asyncio.to_thread(get_pending_records)
+        except Exception as e:
+            log.error("Failed to fetch Airtable records: %s", e)
+            yield f"""<!DOCTYPE html><html><body>
+                <p style="color:red;font-family:sans-serif">
+                  Failed to fetch Airtable records: {e}
+                </p></body></html>"""
+            return
 
-    if not records:
-        log.info("No pending records found")
-        return HTMLResponse(content=build_html([]))
+        log.info("Found %d pending record(s)", len(records))
 
-    log.info("Found %d pending record(s)", len(records))
+        # Phase 1 — spinner (sent immediately)
+        yield build_spinner_html(len(records))
 
-    results = list(await asyncio.gather(
-        *[asyncio.to_thread(process_record, rec) for rec in records]
-    ))
+        if not records:
+            yield build_results_html([])
+            return
 
-    success = sum(1 for r in results if r["status"] == "success")
-    failed  = sum(1 for r in results if r["status"] == "failed")
-    log.info("WEBHOOK done — %d success, %d failed", success, failed)
+        # Phase 2 — process all records in parallel, then stream results
+        results = list(await asyncio.gather(
+            *[asyncio.to_thread(process_record, rec) for rec in records]
+        ))
 
-    return HTMLResponse(content=build_html(results))
+        success = sum(1 for r in results if r["status"] == "success")
+        failed  = sum(1 for r in results if r["status"] == "failed")
+        log.info("WEBHOOK done — %d success, %d failed", success, failed)
+
+        yield build_results_html(results)
+
+    return StreamingResponse(generate(), media_type="text/html")
 
 
 if __name__ == "__main__":
