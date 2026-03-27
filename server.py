@@ -1,5 +1,5 @@
 """
-Manatal CV Intake — FastAPI Server
+Manatal Upload to Manatal — FastAPI Server
 ===================================
 Routes:
   GET /webhook?api_key=xxx  → Processes all Pending rows in Airtable.
@@ -25,7 +25,7 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="Manatal CV Intake")
+app = FastAPI(title="CV Upload to Manatal")
 
 # ── CONFIG ────────────────────────────────────────────────────
 MANATAL_API_TOKEN = os.getenv("MANATAL_API_TOKEN")
@@ -90,7 +90,7 @@ def add_note(candidate_id: int, source: str, job_id: str) -> None:
     info = (
         f"<p><strong>Source:</strong> {source}</p>"
         f"<p><strong>Job ID:</strong> {job_id}</p>"
-        f"<p><strong>Uploaded via:</strong> Oxydata CV Intake</p>"
+        f"<p><strong>Uploaded via:</strong>CV Upload to Manatal</p>"
     )
     r = requests.post(
         f"{MANATAL_BASE}/candidates/{candidate_id}/notes/",
@@ -208,6 +208,8 @@ _PAGE_STYLES = """
           background: #f9fafb; color: #111827; margin: 0; padding: 40px 24px; }
   h1    { font-size: 20px; font-weight: 700; margin: 0 0 4px }
   .sub  { color: #6b7280; font-size: 14px; margin-bottom: 24px }
+  .desc { color: #374151; font-size: 14px; margin: 0 0 8px; max-width: 760px }
+  .meta { color: #6b7280; font-size: 14px; margin: 0 0 24px }
   .stats{ display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap }
   .stat { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
           padding: 12px 20px; min-width: 100px }
@@ -222,6 +224,8 @@ _PAGE_STYLES = """
   .spinner { width: 36px; height: 36px; border: 3px solid #e5e7eb;
              border-top-color: #6b7280; border-radius: 50%;
              animation: spin .8s linear infinite; margin-bottom: 16px }
+  .loading-wrap { min-height: 50vh; display: flex; flex-direction: column;
+                  justify-content: center; align-items: center; text-align: center }
 """
 
 
@@ -232,14 +236,16 @@ def build_spinner_html(count: int) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CV Intake — Processing</title>
+  <title>CV Upload to Manatal — Processing</title>
   <style>{_PAGE_STYLES}</style>
 </head>
 <body>
   <div id="spinner-view">
-    <div class="spinner"></div>
-    <h1>Processing {count} {noun}...</h1>
-    <p class="sub">Uploading to Manatal — please wait</p>
+    <div class="loading-wrap">
+      <div class="spinner"></div>
+      <h1>Processing {count} {noun}...</h1>
+      <p class="sub">Uploading CVs to Manatal. Please keep this tab open.</p>
+    </div>
   </div>
   <div id="results-view" style="display:none"></div>
 """
@@ -250,6 +256,7 @@ def build_results_html(results: list) -> str:
     failed  = sum(1 for r in results if r["status"] == "failed")
     total   = len(results)
     summary_color = "#16a34a" if failed == 0 else "#dc2626"
+    has_records = total > 0
 
     rows = ""
     for r in results:
@@ -267,10 +274,26 @@ def build_results_html(results: list) -> str:
           <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#6b7280;font-size:13px">{detail}</td>
         </tr>"""
 
+    table_markup = ""
+    if has_records:
+        table_markup = f"""
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Job ID</th><th>Source</th><th>Status</th><th>Detail</th></tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>"""
+
+    empty_state_markup = ""
+    if not has_records:
+        empty_state_markup = """
+    <p class="sub">There are no records in 'Manual CV Upload to Manatal' or all are already uploaded.</p>"""
+
     results_markup = f"""
   <div id="results-content" style="display:none">
-    <h1>CV Intake — Run Complete</h1>
-    <p class="sub">Processed {total} pending record(s)</p>
+    <h1>CV Upload to Manatal — Run Complete</h1>
+    <p class="desc">Purpose: Upload CVs (e.g., Monster or Jobstreet) to Manatal and place them in 'New Candidates' for the given Job ID.</p>
+    <p class="meta">Processed {total} pending record(s)</p>
     <div class="stats">
       <div class="stat">
         <div class="stat-n" style="color:{summary_color}">{success}</div>
@@ -281,12 +304,8 @@ def build_results_html(results: list) -> str:
         <div class="stat-l">Failed</div>
       </div>
     </div>
-    <table>
-      <thead>
-        <tr><th>Name</th><th>Job ID</th><th>Source</th><th>Status</th><th>Detail</th></tr>
-      </thead>
-      <tbody>{rows}</tbody>
-    </table>
+    {empty_state_markup}
+    {table_markup}
   </div>
   <script>
     document.getElementById('spinner-view').style.display = 'none';
