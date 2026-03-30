@@ -320,6 +320,11 @@ def build_results_html(results: list) -> str:
 
 
 # ── ROUTES ────────────────────────────────────────────────────
+@app.get("/")
+async def root():
+    return {"status": "ok"}
+
+
 @app.get("/ping")
 async def ping():
     return {"status": "ok"}
